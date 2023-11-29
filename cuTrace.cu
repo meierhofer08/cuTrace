@@ -116,7 +116,7 @@ __device__ float3 operator*(const uint3 u, const float s) {
 // -------------- END VECTOR FUNCTIONS --------------
 
 Sphere* g_spheres = nullptr;
-__device__ int g_spheresSize = 0;
+int allSpheresSize = 0;
 
 #define MAX_SPHERES 30
 __device__ const float PI = 3.141592653589793f;
@@ -147,7 +147,7 @@ __device__ float clamp(float value, float min, float max) {
     }
 }
 
-__global__ void runCuTracePass(Sphere* spheres, float4* radiance, unsigned pass, int spp, unsigned resx, unsigned resy) {
+__global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, float4* radiance, unsigned pass, int spp, unsigned resx, unsigned resy) {
     unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
     if (uid >= resx * resy) {
         return;
@@ -161,7 +161,7 @@ __global__ void runCuTracePass(Sphere* spheres, float4* radiance, unsigned pass,
     auto* s_spheres = (Sphere*) sf_spheres;
     unsigned idInBlock = uid % blockDim.x;
     auto* f_spheres = (float4*) spheres;
-    if (idInBlock < g_spheresSize * 3) {
+    if (idInBlock < spheresSize * 3) {
         sf_spheres[idInBlock] = f_spheres[idInBlock];
     }
     __syncthreads();
@@ -184,7 +184,7 @@ __global__ void runCuTracePass(Sphere* spheres, float4* radiance, unsigned pass,
     //-- loop over ray bounces
     for (int depth = 0, maxDepth = 12; depth < maxDepth; depth++) {
         float d, inf = 1e20, t = inf, eps = 1e-4;   // intersect ray with scene
-        for (int i = g_spheresSize; i-- > 0;) {
+        for (int i = spheresSize; i-- > 0;) {
             Sphere& s = s_spheres[i];                  // perform intersection test
             float3 oc = make_float3(s.center) - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
             float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.center.w * s.center.w;
@@ -250,7 +250,7 @@ __global__ void runCuTracePass(Sphere* spheres, float4* radiance, unsigned pass,
 }
 
 __global__ void
-runCuTraceOffset(Sphere* spheres, float4* radiance, int spp, unsigned resx, unsigned resy, unsigned batchSize,
+runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, int spp, unsigned resx, unsigned resy, unsigned batchSize,
                  unsigned offset) {
     unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
     if (uid >= batchSize) {
@@ -266,12 +266,10 @@ runCuTraceOffset(Sphere* spheres, float4* radiance, int spp, unsigned resx, unsi
     float2 fimgdim{(float) resx, (float) resy};
     float4 accRadiance{0, 0, 0, 0};
 
-    __shared__ float4 sf_spheres[MAX_SPHERES * 3];
-    auto* s_spheres = (Sphere*) sf_spheres;
+    __shared__ Sphere s_spheres[MAX_SPHERES];
     unsigned idInBlock = uid % blockDim.x;
-    auto* f_spheres = (float4*) spheres;
-    if (idInBlock < g_spheresSize * 3) {
-        sf_spheres[idInBlock] = f_spheres[idInBlock];
+    if (idInBlock < spheresSize) {
+        s_spheres[idInBlock] = spheres[idInBlock];
     }
     __syncthreads();
 
@@ -294,7 +292,7 @@ runCuTraceOffset(Sphere* spheres, float4* radiance, int spp, unsigned resx, unsi
         //-- loop over ray bounces
         for (int depth = 0, maxDepth = 12; depth < maxDepth; depth++) {
             float d, inf = 1e20, t = inf, eps = 1e-4;   // intersect ray with scene
-            for (int i = g_spheresSize; i-- > 0;) {
+            for (int i = spheresSize; i-- > 0;) {
                 Sphere& s = s_spheres[i];                  // perform intersection test
                 float3 oc = make_float3(s.center) - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
                 float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.center.w * s.center.w;
@@ -375,9 +373,9 @@ __global__ void showNoise(Sphere* spheres, float4* radiance, unsigned pass, int 
     radiance[uid] = pixRadiance;
 }
 
-__global__ void printSphereInfo(Sphere* spheres, int pass, int spp) {
+__global__ void printSphereInfo(Sphere* spheres, const unsigned spheresSize, int pass, int spp) {
     unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (uid >= g_spheresSize) {
+    if (uid >= spheresSize) {
         return;
     }
     Sphere* sphere = spheres + uid;
@@ -397,7 +395,7 @@ void prepareData(Sphere* spheres, int spheresSize) {
     std::printf("Preparing data...\n");
     cudaMalloc(&g_spheres, spheresSize * sizeof(Sphere));
     cudaMemcpy(g_spheres, spheres, spheresSize * sizeof(Sphere), cudaMemcpyHostToDevice);
-    cudaMemcpyToSymbol(g_spheresSize, &spheresSize, sizeof(int), 0, cudaMemcpyHostToDevice);
+    allSpheresSize = spheresSize;
 }
 
 int getSPcores(cudaDeviceProp devProp) {
@@ -443,7 +441,7 @@ int getSPcores(cudaDeviceProp devProp) {
 void runTracerPass(int resx, int resy, int spp, float4* g_radiance) {
     const unsigned blockSize = 128;
     for (unsigned pass = 0; pass < spp; pass++) {
-        runCuTracePass<<<resx * resy / blockSize, blockSize>>>(g_spheres, g_radiance, pass, spp, resx, resy);
+        runCuTracePass<<<resx * resy / blockSize, blockSize>>>(g_spheres, allSpheresSize, g_radiance, pass, spp, resx, resy);
         auto err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
             printf("Error: %s", cudaGetErrorString(err));
@@ -454,8 +452,9 @@ void runTracerPass(int resx, int resy, int spp, float4* g_radiance) {
 }
 
 void runTracerOffset(int resx, int resy, int spp, float4* g_radiance) {
-    const unsigned blockFactor = 60;
-    const unsigned blockSize = 256;
+    const unsigned blockSize = 128;
+    const unsigned coreOverfill = blockSize / 32;
+    const unsigned batchFactor = coreOverfill * 16;
 
     int device;
     cudaGetDevice(&device);
@@ -463,9 +462,9 @@ void runTracerOffset(int resx, int resy, int spp, float4* g_radiance) {
     cudaGetDeviceProperties(&props, device);
     unsigned cores = getSPcores(props);
 
-    unsigned batchSize = cores * blockFactor;
+    unsigned batchSize = cores * batchFactor;
     for (unsigned offset = 0; offset < resx * resy; offset += batchSize) {
-        runCuTraceOffset<<<batchSize / blockSize, blockSize>>>(g_spheres, g_radiance, spp, resx, resy, batchSize,
+        runCuTraceOffset<<<batchSize / blockSize, blockSize>>>(g_spheres, allSpheresSize, g_radiance, spp, resx, resy, batchSize,
                                                            offset);
         auto err = cudaDeviceSynchronize();
         if (err != cudaSuccess) {
