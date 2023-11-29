@@ -119,7 +119,11 @@ Sphere* g_spheres = nullptr;
 __device__ int g_spheresSize = 0;
 
 #define MAX_SPHERES 30
-#define PI 3.141592653589793
+__device__ const float PI = 3.141592653589793f;
+#define cam Ray{float3{0, 0.52, 7.4}, normalize(float3{0, -0.06, -1})}
+#define cx normalize(cross(cam.d, abs(cam.d.y) < 0.9 ? float3{0, 1, 0} : float3{0, 0, 1}))
+#define cy cross(cx, cam.d)
+#define sdim float2{0.036, 0.024};    // sensor size (36 x 24 mm)
 
 
 __device__ float3 rand01(uint3 seed) {                   // pseudo-random number generator
@@ -143,8 +147,111 @@ __device__ float clamp(float value, float min, float max) {
     }
 }
 
-__global__ void runCuTrace(Sphere* spheres, float4* radiance, int spp, unsigned resx, unsigned resy, unsigned batchSize,
-                           unsigned offset) {
+__global__ void runCuTracePass(Sphere* spheres, float4* radiance, unsigned pass, int spp, unsigned resx, unsigned resy) {
+    unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (uid >= resx * resy) {
+        return;
+    }
+    unsigned yPos = uid / resx;
+    unsigned xPos = uid % resx;
+    float2 fpix{(float) xPos, (float) yPos};
+    float2 fimgdim{(float) resx, (float) resy};
+
+    __shared__ float4 sf_spheres[MAX_SPHERES * 3];
+    auto* s_spheres = (Sphere*) sf_spheres;
+    unsigned idInBlock = uid % blockDim.x;
+    auto* f_spheres = (float4*) spheres;
+    if (idInBlock < g_spheresSize * 3) {
+        sf_spheres[idInBlock] = f_spheres[idInBlock];
+    }
+    __syncthreads();
+
+    //-- sample sensor
+    float3 rnd2 = 2 * rand01(uint3{xPos, yPos, pass});   // vvv tent filter sample
+    float2 tent{rnd2.x < 1 ? sqrt(rnd2.x) - 1 : 1 - sqrt(2 - rnd2.x),
+                rnd2.y < 1 ? sqrt(rnd2.y) - 1 : 1 - sqrt(2 - rnd2.y)};
+    float2 sens =
+            ((fpix + 0.5 * (0.5 + float2{(float) ((pass / 2) % 2), (float) (pass % 2)} + tent)) / fimgdim - 0.5) *
+    sdim;
+    float3 spos = cam.o + cx * sens.x + cy * sens.y, lc =
+            cam.o + cam.d * 0.035;           // sample on 3d sensor plane
+    float3 accrad{0, 0, 0}, accmat{1, 1, 1};
+    Ray r{lc, normalize(lc - spos)};          // construct ray
+    Sphere obj{{},
+               {},
+               {}};
+
+    //-- loop over ray bounces
+    for (int depth = 0, maxDepth = 12; depth < maxDepth; depth++) {
+        float d, inf = 1e20, t = inf, eps = 1e-4;   // intersect ray with scene
+        for (int i = g_spheresSize; i-- > 0;) {
+            Sphere& s = s_spheres[i];                  // perform intersection test
+            float3 oc = make_float3(s.center) - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
+            float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.center.w * s.center.w;
+            if (det < 0) continue; else det = sqrt(det);
+            d = (d = b - det) > eps ? d : ((d = b + det) > eps ? d : inf);
+            if (d < t) {
+                t = d;
+                obj = s;
+            }
+        }
+        if (t < inf) {// object hit
+            float3 x = r.o + r.d * t, n = normalize(x - make_float3(obj.center)), nl =
+                    dot(n, r.d) < 0 ? n : n * (-1);
+            float p = max(max(obj.material.x, obj.material.y), obj.material.z);  // max reflectance
+            accrad = accrad + accmat * make_float3(obj.emission);
+            accmat = accmat * make_float3(obj.material);
+            float3 rdir = reflect(r.d, n), rnd = rand01(uint3{xPos, yPos, pass * maxDepth + depth});
+            if (depth > 5) {
+                if (rnd.z >= p) break;  // Russian Roulette ray termination
+                else accmat = accmat / p;       // Energy compensation of surviving rays
+            }
+            //-- Ideal DIFFUSE reflection
+            if (obj.material.w == 1) {
+                float r1 = 2 * PI * rnd.x, r2 = rnd.y, r2s = sqrt(r2);  // cosine-weighted importance sampling
+                float3 w = nl, u = normalize(
+                        (cross(abs(w.x) > 0.1 ? float3{0, 1, 0} : float3{1, 0, 0}, w))), v = cross(
+                        w, u);
+                r = Ray{x, normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrt(1 - r2))};
+            }
+                //-- Ideal SPECULAR reflection
+            else if (obj.material.w == 2) {
+                r = Ray{x, rdir};
+            }
+                //-- Ideal dielectric REFRACTION
+            else if (obj.material.w == 3) {
+                bool into = n == nl;
+                float cos2t, nc = 1, nt = 1.5, nnt = into ? nc / nt : nt / nc, ddn = dot(r.d, nl);
+                if ((cos2t = 1 - nnt * nnt * (1 - ddn * ddn)) >= 0) {  // Fresnel reflection/refraction
+                    float3 tdir = normalize(r.d * nnt - n * ((into ? 1.f : -1.f) * (ddn * nnt + sqrt(cos2t))));
+                    float a = nt - nc, b = nt + nc, R0 = a * a / (b * b), c = 1 - (into ? -ddn : dot(tdir, n));
+                    float Re = R0 + (1 - R0) * c * c * c * c * c, Tr = 1 - Re, P = 0.25 + 0.5 * Re, RP =
+                            Re / P, TP =
+                            Tr / (1 - P);
+                    r = Ray{x, rnd.x < P ? rdir : tdir};    // pick reflection with probability P
+                    accmat = accmat * (rnd.x < P ? RP : TP);         // energy compensation
+                } else r = Ray{x, rdir};                    // Total internal reflection
+            }
+        }
+    }
+
+    float4 accRadiance{0, 0, 0, 0};
+    if (pass > 0) {
+        accRadiance = radiance[uid];
+    }
+    accRadiance.x += accrad.x / spp;
+    accRadiance.y += accrad.y / spp;
+    accRadiance.z += accrad.z / spp;
+
+    accRadiance.x = pow(clamp(accRadiance.x, 0, 1), 0.45) * 255 + 0.5;
+    accRadiance.y = pow(clamp(accRadiance.y, 0, 1), 0.45) * 255 + 0.5;
+    accRadiance.z = pow(clamp(accRadiance.z, 0, 1), 0.45) * 255 + 0.5;
+    radiance[uid] = accRadiance;
+}
+
+__global__ void
+runCuTraceOffset(Sphere* spheres, float4* radiance, int spp, unsigned resx, unsigned resy, unsigned batchSize,
+                 unsigned offset) {
     unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
     if (uid >= batchSize) {
         return;
@@ -155,17 +262,9 @@ __global__ void runCuTrace(Sphere* spheres, float4* radiance, int spp, unsigned 
     }
     unsigned yPos = uid / resx;
     unsigned xPos = uid % resx;
-
-    uint2 pix{xPos, yPos};
-    float2 fpix{(float) pix.x, (float) pix.y};
-    uint2 imgdim{resx, resy};
-    float2 fimgdim{(float) imgdim.x, (float) imgdim.y};
+    float2 fpix{(float) xPos, (float) yPos};
+    float2 fimgdim{(float) resx, (float) resy};
     float4 accRadiance{0, 0, 0, 0};
-
-    //-- define camera
-    Ray cam{float3{0, 0.52, 7.4}, normalize(float3{0, -0.06, -1})};
-    float3 cx = normalize(cross(cam.d, abs(cam.d.y) < 0.9 ? float3{0, 1, 0} : float3{0, 0, 1})), cy = cross(cx, cam.d);
-    const float2 sdim{0.036, 0.024};    // sensor size (36 x 24 mm)
 
     __shared__ float4 sf_spheres[MAX_SPHERES * 3];
     auto* s_spheres = (Sphere*) sf_spheres;
@@ -178,12 +277,12 @@ __global__ void runCuTrace(Sphere* spheres, float4* radiance, int spp, unsigned 
 
     //-- sample sensor
     for (unsigned pass = 0; pass < spp; pass++) {
-        float3 rnd2 = 2 * rand01(uint3{pix.x, pix.y, pass});   // vvv tent filter sample
+        float3 rnd2 = 2 * rand01(uint3{xPos, yPos, pass});   // vvv tent filter sample
         float2 tent{rnd2.x < 1 ? sqrt(rnd2.x) - 1 : 1 - sqrt(2 - rnd2.x),
                     rnd2.y < 1 ? sqrt(rnd2.y) - 1 : 1 - sqrt(2 - rnd2.y)};
         float2 sens =
                 ((fpix + 0.5 * (0.5 + float2{(float) ((pass / 2) % 2), (float) (pass % 2)} + tent)) / fimgdim - 0.5) *
-                sdim;
+        sdim;
         float3 spos = cam.o + cx * sens.x + cy * sens.y, lc =
                 cam.o + cam.d * 0.035;           // sample on 3d sensor plane
         float3 accrad{0, 0, 0}, accmat{1, 1, 1};
@@ -212,7 +311,7 @@ __global__ void runCuTrace(Sphere* spheres, float4* radiance, int spp, unsigned 
                 float p = max(max(obj.material.x, obj.material.y), obj.material.z);  // max reflectance
                 accrad = accrad + accmat * make_float3(obj.emission);
                 accmat = accmat * make_float3(obj.material);
-                float3 rdir = reflect(r.d, n), rnd = rand01(uint3{pix.x, pix.y, pass * maxDepth + depth});
+                float3 rdir = reflect(r.d, n), rnd = rand01(uint3{xPos, yPos, pass * maxDepth + depth});
                 if (depth > 5) {
                     if (rnd.z >= p) break;  // Russian Roulette ray termination
                     else accmat = accmat / p;       // Energy compensation of surviving rays
@@ -341,12 +440,22 @@ int getSPcores(cudaDeviceProp devProp) {
     return cores;
 }
 
-float4* runTracer(int resx, int resy, int spp) {
-    std::printf("Running tracer...\n");
-    const unsigned blockFactor = 8;
+void runTracerPass(int resx, int resy, int spp, float4* g_radiance) {
+    const unsigned blockSize = 128;
+    for (unsigned pass = 0; pass < spp; pass++) {
+        runCuTracePass<<<resx * resy / blockSize, blockSize>>>(g_spheres, g_radiance, pass, spp, resx, resy);
+        auto err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            printf("Error: %s", cudaGetErrorString(err));
+            return;
+        }
+        fprintf(stderr, "\rRendering (%d spp) %5.2f%%", spp, 100.0 * (pass+1) / spp);
+    }
+}
 
-    float4* g_radiance;
-    cudaMalloc(&g_radiance, resx * resy * sizeof(float4));
+void runTracerOffset(int resx, int resy, int spp, float4* g_radiance) {
+    const unsigned blockFactor = 60;
+    const unsigned blockSize = 256;
 
     int device;
     cudaGetDevice(&device);
@@ -354,14 +463,25 @@ float4* runTracer(int resx, int resy, int spp) {
     cudaGetDeviceProperties(&props, device);
     unsigned cores = getSPcores(props);
 
-    for (unsigned offset = 0; offset < resx * resy; offset += cores * blockFactor) {
-        runCuTrace<<<cores / 32, blockFactor * 32>>>(g_spheres, g_radiance, spp, resx, resy, cores * blockFactor,
-                                                     offset);
+    unsigned batchSize = cores * blockFactor;
+    for (unsigned offset = 0; offset < resx * resy; offset += batchSize) {
+        runCuTraceOffset<<<batchSize / blockSize, blockSize>>>(g_spheres, g_radiance, spp, resx, resy, batchSize,
+                                                           offset);
+        auto err = cudaDeviceSynchronize();
+        if (err != cudaSuccess) {
+            printf("Error: %s", cudaGetErrorString(err));
+            return;
+        }
+        fprintf(stderr, "\rRendering (%d spp) %5.2f%%", spp, 100.0 * ((float)(offset + batchSize) / (resx * resy)));
     }
-    auto err = cudaDeviceSynchronize();
-    if (err != cudaSuccess) {
-        printf("%s", cudaGetErrorString(err));
-    }
+}
+
+float4* runTracer(int resx, int resy, int spp) {
+    std::printf("Running tracer...\n");
+    float4* g_radiance;
+    cudaMalloc(&g_radiance, resx * resy * sizeof(float4));
+
+    runTracerOffset(resx, resy, spp, g_radiance);
     auto* radiance = (float4*) malloc(resx * resy * sizeof(float4));
     cudaMemcpy(radiance, g_radiance, resx * resy * sizeof(float4), cudaMemcpyDeviceToHost);
 
