@@ -32,7 +32,7 @@ int main(int argc, char** argv) {
     // run tracer
     auto tstart = std::chrono::system_clock::now();		                    // take start time
     prepareData(spheres, sizeof(spheres) / sizeof(Sphere));
-    float4* pixels = runTracer(resx, resy, spp);
+    float3* pixels = runTracer(resx, resy, spp);
     auto tend = std::chrono::system_clock::now();
 
     // write output

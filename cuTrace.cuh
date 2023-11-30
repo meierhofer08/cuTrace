@@ -26,6 +26,6 @@ struct Ray { float3 o; float3 d; };
 #define BOX_HZ	2.8
 
 void prepareData(Sphere* spheres, int spheresSize);
-float4* runTracer(int resx, int resy, int spp);
+float3* runTracer(int resx, int resy, int spp);
 
 #endif //CUTRACE_CUTRACE_CUH

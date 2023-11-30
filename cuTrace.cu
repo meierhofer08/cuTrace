@@ -84,10 +84,6 @@ __device__ bool operator==(const float3& a, const float3& b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
 }
 
-__device__ float3 make_float3(const float4& f4) {
-    return {f4.x, f4.y, f4.z};
-}
-
 __device__ float dot(const float3 a, const float3 b) {
     return a.x * b.x + a.y * b.y + a.z * b.z;
 }
@@ -147,7 +143,7 @@ __device__ float clamp(float value, float min, float max) {
     }
 }
 
-__global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, float4* radiance, unsigned pass, int spp, unsigned resx, unsigned resy) {
+__global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, float3* radiance, unsigned pass, int spp, unsigned resx, unsigned resy) {
     unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
     if (uid >= resx * resy) {
         return;
@@ -157,12 +153,10 @@ __global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, floa
     float2 fpix{(float) xPos, (float) yPos};
     float2 fimgdim{(float) resx, (float) resy};
 
-    __shared__ float4 sf_spheres[MAX_SPHERES * 3];
-    auto* s_spheres = (Sphere*) sf_spheres;
+    __shared__ Sphere s_spheres[MAX_SPHERES];
     unsigned idInBlock = uid % blockDim.x;
-    auto* f_spheres = (float4*) spheres;
-    if (idInBlock < spheresSize * 3) {
-        sf_spheres[idInBlock] = f_spheres[idInBlock];
+    if (idInBlock < spheresSize) {
+        s_spheres[idInBlock] = spheres[idInBlock];
     }
     __syncthreads();
 
@@ -235,13 +229,11 @@ __global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, floa
         }
     }
 
-    float4 accRadiance{0, 0, 0, 0};
+    float3 accRadiance{0, 0, 0};
     if (pass > 0) {
         accRadiance = radiance[uid];
     }
-    accRadiance.x += accrad.x / spp;
-    accRadiance.y += accrad.y / spp;
-    accRadiance.z += accrad.z / spp;
+    accRadiance = accRadiance + accrad / spp;
 
     accRadiance.x = pow(clamp(accRadiance.x, 0, 1), 0.45) * 255 + 0.5;
     accRadiance.y = pow(clamp(accRadiance.y, 0, 1), 0.45) * 255 + 0.5;
@@ -250,7 +242,7 @@ __global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, floa
 }
 
 __global__ void
-runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, int spp, unsigned resx, unsigned resy, unsigned batchSize,
+runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float3* radiance, int spp, unsigned resx, unsigned resy, unsigned batchSize,
                  unsigned offset) {
     unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
     if (uid >= batchSize) {
@@ -264,7 +256,7 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, 
     unsigned xPos = uid % resx;
     float2 fpix{(float) xPos, (float) yPos};
     float2 fimgdim{(float) resx, (float) resy};
-    float4 accRadiance{0, 0, 0, 0};
+    float3 accRadiance{0, 0, 0};
 
     __shared__ Sphere s_spheres[MAX_SPHERES];
     unsigned idInBlock = uid % blockDim.x;
@@ -343,9 +335,7 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, 
             }
         }
 
-        accRadiance.x += accrad.x / spp;
-        accRadiance.y += accrad.y / spp;
-        accRadiance.z += accrad.z / spp;
+        accRadiance = accRadiance + accrad / spp;
     }
 
     accRadiance.x = pow(clamp(accRadiance.x, 0, 1), 0.45) * 255 + 0.5;
@@ -354,7 +344,7 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, 
     radiance[uid] = accRadiance;
 }
 
-__global__ void showNoise(Sphere* spheres, float4* radiance, unsigned pass, int spp, int resx, int resy) {
+__global__ void showNoise(Sphere* spheres, float3* radiance, unsigned pass, int spp, int resx, int resy) {
     unsigned uid = blockIdx.x * blockDim.x + threadIdx.x;
     if (uid > resx * resy) {
         return;
@@ -364,7 +354,7 @@ __global__ void showNoise(Sphere* spheres, float4* radiance, unsigned pass, int 
 
     // output noise
     float3 randomRadiance = rand01({x, y, pass});
-    float4 pixRadiance{randomRadiance.x, randomRadiance.y, randomRadiance.z, 0};
+    float3 pixRadiance{randomRadiance.x, randomRadiance.y, randomRadiance.z};
     if (pass == spp - 1) {
         pixRadiance.x = pow(clamp(pixRadiance.x, 0, 1), 0.45) * 255 + 0.5;
         pixRadiance.y = pow(clamp(pixRadiance.y, 0, 1), 0.45) * 255 + 0.5;
@@ -438,7 +428,7 @@ int getSPcores(cudaDeviceProp devProp) {
     return cores;
 }
 
-void runTracerPass(int resx, int resy, int spp, float4* g_radiance) {
+void runTracerPass(int resx, int resy, int spp, float3* g_radiance) {
     const unsigned blockSize = 128;
     for (unsigned pass = 0; pass < spp; pass++) {
         runCuTracePass<<<resx * resy / blockSize, blockSize>>>(g_spheres, allSpheresSize, g_radiance, pass, spp, resx, resy);
@@ -451,7 +441,7 @@ void runTracerPass(int resx, int resy, int spp, float4* g_radiance) {
     }
 }
 
-void runTracerOffset(int resx, int resy, int spp, float4* g_radiance) {
+void runTracerOffset(int resx, int resy, int spp, float3* g_radiance) {
     const unsigned blockSize = 32;
     const unsigned coreOverfill = blockSize / 32;
     const unsigned batchFactor = coreOverfill * 64;
@@ -475,14 +465,14 @@ void runTracerOffset(int resx, int resy, int spp, float4* g_radiance) {
     }
 }
 
-float4* runTracer(int resx, int resy, int spp) {
+float3* runTracer(int resx, int resy, int spp) {
     std::printf("Running tracer...\n");
-    float4* g_radiance;
-    cudaMalloc(&g_radiance, resx * resy * sizeof(float4));
+    float3* g_radiance;
+    cudaMalloc(&g_radiance, resx * resy * sizeof(float3));
 
     runTracerOffset(resx, resy, spp, g_radiance);
-    auto* radiance = (float4*) malloc(resx * resy * sizeof(float4));
-    cudaMemcpy(radiance, g_radiance, resx * resy * sizeof(float4), cudaMemcpyDeviceToHost);
+    auto* radiance = (float3*) malloc(resx * resy * sizeof(float3));
+    cudaMemcpy(radiance, g_radiance, resx * resy * sizeof(float3), cudaMemcpyDeviceToHost);
 
     return radiance;
 }
