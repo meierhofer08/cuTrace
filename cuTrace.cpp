@@ -8,16 +8,16 @@
 
 #include "cuTrace.cuh"
 
-Sphere spheres[] = {  // center.xyz, radius  |  emmission.xyz, 0  |  color.rgb, refltype
-        -1e2 - BOX_HX, 0, 0, 1e2,       0, 0, 0, 0,  .55, .90, .20,  REFL_DIFF, // Left (DIFFUSE)
-        1e2  + BOX_HX, 0, 0, 1e2,       0, 0, 0, 0,  .75, .15, .75,  REFL_DIFF, // Right
-        0, 1e2 + BOX_HY, 0, 1e2,        0, 0, 0, 0,  .75, .75, .75,  REFL_DIFF, // Top
-        0,-1e2 - BOX_HY, 0, 1e2,        0, 0, 0, 0,  .75, .75, .75,  REFL_DIFF, // Bottom
-        0, 0, -1e2 - BOX_HZ, 1e2,       0, 0, 0, 0,  .75, .75, .75,  REFL_DIFF, // Back
-        0, 0, 1e2 + 3*BOX_HZ, 1e2,      0, 0, 0, 0,  0, 0, 0,        REFL_DIFF, // Front
-        -1.3, -BOX_HY + 0.8, -1.3, 0.8, 0, 0, 0, 0,  .999,.999,.999, REFL_SPEC, // REFLECTIVE
-        1.3, -BOX_HY + 0.8, -0.2, 0.8,  0, 0, 0, 0,  .999,.999,.999, REFL_FRAC, // REFRACTIVE
-        0, BOX_HY + 9.96, 0, 10,        14.7,15,13.5, 0,  0, 0, 0,   REFL_DIFF, // Light
+Sphere spheres[] = {  // center.xyz, radius  |  emmission.xyz  |  color.rgb, refltype
+        -1e2 - BOX_HX, 0, 0, 1e2,       0, 0, 0,  .55, .90, .20,  REFL_DIFF, // Left (DIFFUSE)
+        1e2  + BOX_HX, 0, 0, 1e2,       0, 0, 0,  .75, .15, .75,  REFL_DIFF, // Right
+        0, 1e2 + BOX_HY, 0, 1e2,        0, 0, 0, .75, .75, .75,  REFL_DIFF, // Top
+        0,-1e2 - BOX_HY, 0, 1e2,        0, 0, 0,  .75, .75, .75,  REFL_DIFF, // Bottom
+        0, 0, -1e2 - BOX_HZ, 1e2,       0, 0, 0,  .75, .75, .75,  REFL_DIFF, // Back
+        0, 0, 1e2 + 3*BOX_HZ, 1e2,      0, 0, 0,  0, 0, 0,        REFL_DIFF, // Front
+        -1.3, -BOX_HY + 0.8, -1.3, 0.8, 0, 0, 0,  .999,.999,.999, REFL_SPEC, // REFLECTIVE
+        1.3, -BOX_HY + 0.8, -0.2, 0.8,  0, 0, 0,  .999,.999,.999, REFL_FRAC, // REFRACTIVE
+        0, BOX_HY + 9.96, 0, 10,        14.7,15,13.5,  0, 0, 0,   REFL_DIFF, // Light
 };
 
 int main(int argc, char** argv) {

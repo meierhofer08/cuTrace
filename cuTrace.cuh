@@ -8,9 +8,11 @@
 #include <vector_types.h>
 
 struct Sphere {
-    float4 center; // center.xyz, radius
-    float4 emission; // emission.xyz, 0
-    float4 material; // material.rgb, refltype
+    float3 center;
+    float radius;
+    float3 emission;
+    float3 material;
+    int refltype;
 };
 
 #define REFL_DIFF 1

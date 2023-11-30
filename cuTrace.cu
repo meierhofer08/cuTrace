@@ -186,8 +186,8 @@ __global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, floa
         float d, inf = 1e20, t = inf, eps = 1e-4;   // intersect ray with scene
         for (int i = spheresSize; i-- > 0;) {
             Sphere& s = s_spheres[i];                  // perform intersection test
-            float3 oc = make_float3(s.center) - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
-            float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.center.w * s.center.w;
+            float3 oc = s.center - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
+            float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.radius * s.radius;
             if (det < 0) continue; else det = sqrt(det);
             d = (d = b - det) > eps ? d : ((d = b + det) > eps ? d : inf);
             if (d < t) {
@@ -196,18 +196,18 @@ __global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, floa
             }
         }
         if (t < inf) {// object hit
-            float3 x = r.o + r.d * t, n = normalize(x - make_float3(obj.center)), nl =
+            float3 x = r.o + r.d * t, n = normalize(x - obj.center), nl =
                     dot(n, r.d) < 0 ? n : n * (-1);
             float p = max(max(obj.material.x, obj.material.y), obj.material.z);  // max reflectance
-            accrad = accrad + accmat * make_float3(obj.emission);
-            accmat = accmat * make_float3(obj.material);
+            accrad = accrad + accmat * obj.emission;
+            accmat = accmat * obj.material;
             float3 rdir = reflect(r.d, n), rnd = rand01(uint3{xPos, yPos, pass * maxDepth + depth});
             if (depth > 5) {
                 if (rnd.z >= p) break;  // Russian Roulette ray termination
                 else accmat = accmat / p;       // Energy compensation of surviving rays
             }
             //-- Ideal DIFFUSE reflection
-            if (obj.material.w == 1) {
+            if (obj.refltype == REFL_DIFF) {
                 float r1 = 2 * PI * rnd.x, r2 = rnd.y, r2s = sqrt(r2);  // cosine-weighted importance sampling
                 float3 w = nl, u = normalize(
                         (cross(abs(w.x) > 0.1 ? float3{0, 1, 0} : float3{1, 0, 0}, w))), v = cross(
@@ -215,11 +215,11 @@ __global__ void runCuTracePass(Sphere* spheres, const unsigned spheresSize, floa
                 r = Ray{x, normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrt(1 - r2))};
             }
                 //-- Ideal SPECULAR reflection
-            else if (obj.material.w == 2) {
+            else if (obj.refltype == REFL_SPEC) {
                 r = Ray{x, rdir};
             }
                 //-- Ideal dielectric REFRACTION
-            else if (obj.material.w == 3) {
+            else if (obj.refltype == REFL_FRAC) {
                 bool into = n == nl;
                 float cos2t, nc = 1, nt = 1.5, nnt = into ? nc / nt : nt / nc, ddn = dot(r.d, nl);
                 if ((cos2t = 1 - nnt * nnt * (1 - ddn * ddn)) >= 0) {  // Fresnel reflection/refraction
@@ -294,8 +294,8 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, 
             float d, inf = 1e20, t = inf, eps = 1e-4;   // intersect ray with scene
             for (int i = spheresSize; i-- > 0;) {
                 Sphere& s = s_spheres[i];                  // perform intersection test
-                float3 oc = make_float3(s.center) - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
-                float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.center.w * s.center.w;
+                float3 oc = s.center - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
+                float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.radius * s.radius;
                 if (det < 0) continue; else det = sqrt(det);
                 d = (d = b - det) > eps ? d : ((d = b + det) > eps ? d : inf);
                 if (d < t) {
@@ -304,18 +304,18 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, 
                 }
             }
             if (t < inf) {// object hit
-                float3 x = r.o + r.d * t, n = normalize(x - make_float3(obj.center)), nl =
+                float3 x = r.o + r.d * t, n = normalize(x - obj.center), nl =
                         dot(n, r.d) < 0 ? n : n * (-1);
                 float p = max(max(obj.material.x, obj.material.y), obj.material.z);  // max reflectance
-                accrad = accrad + accmat * make_float3(obj.emission);
-                accmat = accmat * make_float3(obj.material);
+                accrad = accrad + accmat * obj.emission;
+                accmat = accmat * obj.material;
                 float3 rdir = reflect(r.d, n), rnd = rand01(uint3{xPos, yPos, pass * maxDepth + depth});
                 if (depth > 5) {
                     if (rnd.z >= p) break;  // Russian Roulette ray termination
                     else accmat = accmat / p;       // Energy compensation of surviving rays
                 }
                 //-- Ideal DIFFUSE reflection
-                if (obj.material.w == 1) {
+                if (obj.refltype == REFL_DIFF) {
                     float r1 = 2 * PI * rnd.x, r2 = rnd.y, r2s = sqrt(r2);  // cosine-weighted importance sampling
                     float3 w = nl, u = normalize(
                             (cross(abs(w.x) > 0.1 ? float3{0, 1, 0} : float3{1, 0, 0}, w))), v = cross(
@@ -323,11 +323,11 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float4* radiance, 
                     r = Ray{x, normalize(u * cos(r1) * r2s + v * sin(r1) * r2s + w * sqrt(1 - r2))};
                 }
                     //-- Ideal SPECULAR reflection
-                else if (obj.material.w == 2) {
+                else if (obj.refltype == REFL_SPEC) {
                     r = Ray{x, rdir};
                 }
                     //-- Ideal dielectric REFRACTION
-                else if (obj.material.w == 3) {
+                else if (obj.refltype == REFL_FRAC) {
                     bool into = n == nl;
                     float cos2t, nc = 1, nt = 1.5, nnt = into ? nc / nt : nt / nc, ddn = dot(r.d, nl);
                     if ((cos2t = 1 - nnt * nnt * (1 - ddn * ddn)) >= 0) {  // Fresnel reflection/refraction
@@ -386,9 +386,9 @@ __global__ void printSphereInfo(Sphere* spheres, const unsigned spheresSize, int
                 "Sphere emission (%f, %f, %f)\n"
                 "Sphere color (%f, %f, %f) Reflection type %f\n"
                 "----\n\n",
-                uid, sphere->center.x, sphere->center.y, sphere->center.z, sphere->center.w,
+                uid, sphere->center.x, sphere->center.y, sphere->center.z, sphere->radius,
                 sphere->emission.x, sphere->emission.y, sphere->emission.z,
-                sphere->material.x, sphere->material.y, sphere->material.z, sphere->material.w);
+                sphere->material.x, sphere->material.y, sphere->material.z, sphere->refltype);
 }
 
 void prepareData(Sphere* spheres, int spheresSize) {
@@ -452,9 +452,9 @@ void runTracerPass(int resx, int resy, int spp, float4* g_radiance) {
 }
 
 void runTracerOffset(int resx, int resy, int spp, float4* g_radiance) {
-    const unsigned blockSize = 128;
+    const unsigned blockSize = 32;
     const unsigned coreOverfill = blockSize / 32;
-    const unsigned batchFactor = coreOverfill * 16;
+    const unsigned batchFactor = coreOverfill * 64;
 
     int device;
     cudaGetDevice(&device);
