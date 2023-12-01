@@ -263,10 +263,10 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float3* radiance, 
     if (idInBlock < spheresSize) {
         s_spheres[idInBlock] = spheres[idInBlock];
     }
-    __syncthreads();
 
     //-- sample sensor
     for (unsigned pass = 0; pass < spp; pass++) {
+        __syncthreads();
         float3 rnd2 = 2 * rand01(uint3{xPos, yPos, pass});   // vvv tent filter sample
         float2 tent{rnd2.x < 1 ? sqrt(rnd2.x) - 1 : 1 - sqrt(2 - rnd2.x),
                     rnd2.y < 1 ? sqrt(rnd2.y) - 1 : 1 - sqrt(2 - rnd2.y)};
@@ -285,7 +285,7 @@ runCuTraceOffset(Sphere* spheres, const unsigned spheresSize, float3* radiance, 
         for (int depth = 0, maxDepth = 12; depth < maxDepth; depth++) {
             float d, inf = 1e20, t = inf, eps = 1e-4;   // intersect ray with scene
             for (int i = spheresSize; i-- > 0;) {
-                Sphere& s = s_spheres[i];                  // perform intersection test
+                Sphere s = s_spheres[i];                  // perform intersection test
                 float3 oc = s.center - r.o;      // Solve t^2*d.d + 2*t*(o-s).d + (o-s).(o-s)-r^2 = 0
                 float b = dot(oc, r.d), det = b * b - dot(oc, oc) + s.radius * s.radius;
                 if (det < 0) continue; else det = sqrt(det);
@@ -442,9 +442,9 @@ void runTracerPass(int resx, int resy, int spp, float3* g_radiance) {
 }
 
 void runTracerOffset(int resx, int resy, int spp, float3* g_radiance) {
-    const unsigned blockSize = 32;
+    const unsigned blockSize = 128;
     const unsigned coreOverfill = blockSize / 32;
-    const unsigned batchFactor = coreOverfill * 64;
+    const unsigned batchFactor = coreOverfill * 16;
 
     int device;
     cudaGetDevice(&device);
